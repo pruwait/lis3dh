@@ -53,7 +53,7 @@ esp32:
 external_components:
   - source: github://pruwait/lis3dh@main
     components: [lis3dh]
-    refresh: 1d
+    refresh: 0s
 
 logger:
 
