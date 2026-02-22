@@ -1,0 +1,46 @@
+esphome:
+  name: lis3dh-device
+
+esp32:
+  board: esp32dev
+
+# Подключите внешний компонент (например, из папки рядом с YAML)
+external_components:
+  - source:
+      type: local
+      path: components
+
+logger:
+i2c:
+  sda: GPIO21
+  scl: GPIO22
+  scan: true
+
+sensor:
+  - platform: lis3dh
+    # I2C адрес: 0x18 (SA0=GND) или 0x19 (SA0=VCC)
+    address: 0x18
+
+    # Диапазон измерений: 2, 4, 8 или 16 (в единицах g)
+    range: 2
+
+    # Частота измерений: 1, 10, 25, 50, 100, 200, 400 (Гц)
+    data_rate: 50
+
+    # Режим пониженного энергопотребления (8-бит, точность ниже)
+    low_power: false
+
+    # Интервал публикации в Home Assistant
+    update_interval: 1s
+
+    accel_x:
+      name: "Ускорение X"
+      id: accel_x
+
+    accel_y:
+      name: "Ускорение Y"
+      id: accel_y
+
+    accel_z:
+      name: "Ускорение Z"
+      id: accel_z
