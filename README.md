@@ -35,7 +35,7 @@
 
 ```yaml
 external_components:
-  - source: github://your-username/esphome-lis3dh@main
+  - source: github://pruwait/lis3dh/@main
     components: [lis3dh]
 ```
 
@@ -51,7 +51,7 @@ esp32:
   board: esp32dev
 
 external_components:
-  - source: github://your-username/esphome-lis3dh@main
+  - source: github://pruwait/lis3dh@main
     components: [lis3dh]
     refresh: 1d
 
