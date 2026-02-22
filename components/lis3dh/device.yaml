@@ -1,0 +1,354 @@
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  LIS3DH Motion Wake-up Device + Generator Voltage Monitor             ║
+# ║                                                                          ║
+# ║  Схема работы:                                                          ║
+# ║    1. ESP32 просыпается от прерывания акселерометра (движение)         ║
+# ║    2. Считывает данные с LIS3DH и напряжение генератора                ║
+# ║    3. Не засыпает пока есть движение ИЛИ генератор работает            ║
+# ║    4. После 5 сек тишины и без генератора — уходит в deep sleep        ║
+# ║                                                                          ║
+# ║  Подключение:                                                           ║
+# ║    LIS3DH SDA  → GPIO21                                                 ║
+# ║    LIS3DH SCL  → GPIO22                                                 ║
+# ║    LIS3DH INT1 → GPIO33   (ext0 wake-up, RTC GPIO)                    ║
+# ║    LIS3DH VCC  → 3.3 V                                                  ║
+# ║    LIS3DH GND  → GND                                                   ║
+# ║    LIS3DH SA0  → GND     (I2C addr 0x18)                              ║
+# ║    LIS3DH CS   → VCC     (I2C mode)                                    ║
+# ║                                                                          ║
+# ║  Напряжение генератора (делитель R1=100кΩ / R2=27кΩ):                 ║
+# ║    Генератор (+) → R1 → GPIO35 → R2 → GND                             ║
+# ║    Диапазон:  0–18 В → 0–3.3 В на АЦП                                 ║
+# ║    Коэф. пересчёта: × 4.704  (= 127/27)                               ║
+# ║    Порог «генератор работает»: > 11.5 В                                ║
+# ║                                                                          ║
+# ║  Батарея ESP32 (делитель R1=100кΩ / R2=100кΩ):                        ║
+# ║    Vbat (+) → R1 → GPIO34 → R2 → GND                                  ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+
+esphome:
+  name: lis3dh-wakeup
+  friendly_name: "Motion Sensor"
+
+  on_boot:
+    priority: 600
+    then:
+      - lambda: |-
+          id(last_motion_ms) = millis();
+      - logger.log:
+          format: "Boot! Wake-up cause: %s"
+          args:
+            - >
+              (id(deep_sleep_ctrl).wakeup_cause() ==
+               esphome::deep_sleep::WakeupCause::EXT0)
+              ? "LIS3DH interrupt (motion)"
+              : "Power-on / reset"
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+# ── Компонент из GitHub ──────────────────────────────────────────────────────
+external_components:
+  - source: github://pruwait/lis3dh@main
+    components: [lis3dh]
+    refresh: 0s
+
+# ── Логирование ─────────────────────────────────────────────────────────────
+logger:
+  level: DEBUG
+  baud_rate: 115200
+
+# ── WiFi ────────────────────────────────────────────────────────────────────
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  fast_connect: true
+
+  on_connect:
+    - logger.log: "WiFi connected, publishing data..."
+
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+# ── I2C ─────────────────────────────────────────────────────────────────────
+i2c:
+  sda: GPIO21
+  scl: GPIO22
+  scan: true
+  frequency: 400kHz
+
+# ── Глобальные переменные ───────────────────────────────────────────────────
+globals:
+  # Время последнего обнаруженного движения (мс от старта)
+  - id: last_motion_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+
+  # Порог тишины перед засыпанием: 5 секунд без движения
+  - id: still_timeout_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '5000'
+
+  # Порог движения: отклонение модуля ускорения от g (м/с²)
+  # 0.15g × 9.8 ≈ 1.47 м/с²
+  - id: motion_accel_threshold
+    type: float
+    restore_value: false
+    initial_value: '1.47'
+
+  # Флаг: генератор в данный момент работает
+  - id: generator_running
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+  # Порог напряжения «генератор работает» (В)
+  # Холостая АКБ: ~12.6 В, заряжаемая генератором: 13.5–14.8 В
+  # 11.5 В — безопасный порог: выше = двигатель работает
+  - id: generator_threshold_v
+    type: float
+    restore_value: false
+    initial_value: '11.5'
+
+# ── Deep Sleep ──────────────────────────────────────────────────────────────
+deep_sleep:
+  id: deep_sleep_ctrl
+
+  # Wake-up от LIS3DH INT1 (HIGH на GPIO33)
+  esp32_ext0_wakeup:
+    pin: GPIO33
+    mode: HIGH
+
+  # Резервный таймер: health-check / OTA каждые 10 минут
+  sleep_duration: 10min
+
+# ── Интервал: проверка условия засыпания ────────────────────────────────────
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          uint32_t now = millis();
+          uint32_t since_motion = now - id(last_motion_ms);
+          bool motion  = since_motion < id(still_timeout_ms);
+          bool gen_run = id(generator_running);
+
+          if (motion || gen_run) {
+            // Хотя бы одно условие активно — не спим
+            ESP_LOGD("sleep", "Staying awake: motion=%s generator=%s",
+                     motion  ? "YES" : "no",
+                     gen_run ? "YES" : "no");
+          } else {
+            // Тишина и генератор выключен — уходим в сон
+            ESP_LOGI("sleep",
+                     "No motion for %u ms, generator OFF → deep sleep", since_motion);
+            id(deep_sleep_ctrl).begin_sleep();
+          }
+
+# ── Сенсоры ─────────────────────────────────────────────────────────────────
+sensor:
+
+  # ── Акселерометр LIS3DH ──────────────────────────────────────────────────
+  - platform: lis3dh
+    id: accel
+    address: 0x18
+    range: 2
+    data_rate: 25
+    low_power: false
+    update_interval: 500ms
+
+    wakeup:
+      threshold: 0.15
+      duration: 2
+      axes: xyz
+      latch: true
+
+    accel_x:
+      name: "Ускорение X"
+      id: accel_x
+      filters:
+        - sliding_window_moving_average:
+            window_size: 3
+            send_every: 3
+
+    accel_y:
+      name: "Ускорение Y"
+      id: accel_y
+      filters:
+        - sliding_window_moving_average:
+            window_size: 3
+            send_every: 3
+
+    accel_z:
+      name: "Ускорение Z"
+      id: accel_z
+      filters:
+        - sliding_window_moving_average:
+            window_size: 3
+            send_every: 3
+
+  # Полное ускорение — используется для детектирования движения
+  - platform: template
+    name: "Полное ускорение"
+    id: total_accel
+    unit_of_measurement: "m/s²"
+    accuracy_decimals: 3
+    icon: mdi:vibrate
+    update_interval: 500ms
+    lambda: |-
+      if (id(accel_x).has_state() && id(accel_y).has_state() && id(accel_z).has_state()) {
+        float x = id(accel_x).state;
+        float y = id(accel_y).state;
+        float z = id(accel_z).state;
+        return sqrtf(x*x + y*y + z*z);
+      }
+      return {};
+    on_value:
+      then:
+        - lambda: |-
+            const float G = 9.80665f;
+            float deviation = fabsf(x - G);
+            if (deviation > id(motion_accel_threshold)) {
+              id(last_motion_ms) = millis();
+              ESP_LOGD("motion", "Motion! deviation=%.3f m/s²", deviation);
+            }
+
+  # ── Напряжение генератора ─────────────────────────────────────────────────
+  # Делитель: R1=100кΩ, R2=27кΩ
+  #   Vgen_max = 18 В → Vadc = 18 × 27/127 = 3.83 В (в пределах 11dB = 3.9 В)
+  #   multiply = (R1+R2)/R2 = 127/27 ≈ 4.704
+  - platform: adc
+    pin: GPIO35          # input-only GPIO, идеален для ADC
+    name: "Напряжение генератора"
+    id: generator_voltage
+    unit_of_measurement: "V"
+    accuracy_decimals: 2
+    attenuation: 11dB    # входной диапазон 0–3.9 В
+    device_class: voltage
+    state_class: measurement
+    icon: mdi:car-battery
+    filters:
+      # Пересчёт с учётом делителя напряжения R1=100к / R2=27к
+      - multiply: 4.704
+      # Усреднение для фильтрации ВЧ-помех от генератора
+      - sliding_window_moving_average:
+          window_size: 10
+          send_every: 5
+      # Обрезаем шум у нуля
+      - lambda: return x < 0.1f ? 0.0f : x;
+    update_interval: 2s
+    on_value:
+      then:
+        - lambda: |-
+            bool was_running = id(generator_running);
+            bool is_running  = x >= id(generator_threshold_v);
+            id(generator_running) = is_running;
+
+            if (is_running != was_running) {
+              ESP_LOGI("generator", "Generator %s (%.2f V)",
+                       is_running ? "STARTED" : "STOPPED", x);
+            } else {
+              ESP_LOGD("generator", "Voltage: %.2f V (%s)",
+                       x, is_running ? "running" : "off");
+            }
+
+  # ── Батарея ESP32 ─────────────────────────────────────────────────────────
+  # Делитель: R1=100кΩ, R2=100кΩ → multiply=2.0
+  - platform: adc
+    pin: GPIO34
+    name: "Напряжение батареи"
+    id: battery_voltage
+    unit_of_measurement: "V"
+    accuracy_decimals: 2
+    attenuation: 11dB
+    filters:
+      - multiply: 2.0
+      - sliding_window_moving_average:
+          window_size: 5
+          send_every: 5
+    update_interval: 30s
+
+  # Уровень заряда (%)
+  - platform: template
+    name: "Заряд батареи"
+    id: battery_level
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    icon: mdi:battery
+    device_class: battery
+    lambda: |-
+      float v = id(battery_voltage).state;
+      float pct = (v - 3.0f) / (4.2f - 3.0f) * 100.0f;
+      return std::max(0.0f, std::min(100.0f, pct));
+    update_interval: 30s
+
+# ── Бинарные сенсоры ─────────────────────────────────────────────────────────
+binary_sensor:
+  # Генератор (двигатель) работает
+  - platform: template
+    name: "Генератор работает"
+    id: generator_active
+    device_class: power
+    icon: mdi:engine
+    lambda: |-
+      return id(generator_running);
+
+  # Текущее движение
+  - platform: template
+    name: "Движение"
+    id: motion_active
+    device_class: motion
+    lambda: |-
+      return (millis() - id(last_motion_ms)) < id(still_timeout_ms);
+
+  # Причина пробуждения
+  - platform: template
+    name: "Пробуждение от движения"
+    id: motion_wakeup
+    device_class: motion
+    lambda: |-
+      return id(deep_sleep_ctrl).wakeup_cause() ==
+             esphome::deep_sleep::WakeupCause::EXT0;
+
+# ── Текстовые сенсоры ────────────────────────────────────────────────────────
+text_sensor:
+  - platform: template
+    name: "Причина пробуждения"
+    id: wakeup_reason
+    on_boot:
+      priority: 500
+      then:
+        - text_sensor.template.publish:
+            id: wakeup_reason
+            state: !lambda |-
+              switch (id(deep_sleep_ctrl).wakeup_cause()) {
+                case esphome::deep_sleep::WakeupCause::EXT0:
+                  return std::string("Движение (LIS3DH INT1)");
+                case esphome::deep_sleep::WakeupCause::TIMER:
+                  return std::string("Таймер (10 мин)");
+                default:
+                  return std::string("Включение питания / сброс");
+              }
+
+  - platform: wifi_info
+    ip_address:
+      name: "IP адрес"
+
+# ── Кнопка ──────────────────────────────────────────────────────────────────
+button:
+  - platform: template
+    name: "Уйти в сон"
+    icon: mdi:sleep
+    on_press:
+      then:
+        - logger.log: "Manual sleep requested"
+        - deep_sleep.enter:
+            id: deep_sleep_ctrl
