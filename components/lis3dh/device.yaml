@@ -35,21 +35,21 @@ esphome:
     then:
       - lambda: |-
           id(last_motion_ms) = millis();
-      - logger.log:
-          format: "Boot! Wake-up cause: %s"
-          args:
-            - >
-              (id(deep_sleep_ctrl).wakeup_cause() ==
-               esphome::deep_sleep::WakeupCause::EXT0)
-              ? "LIS3DH interrupt (motion)"
-              : "Power-on / reset"
+          esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+          if (cause == ESP_SLEEP_WAKEUP_EXT1) {
+            ESP_LOGI("boot", "Wake-up cause: LIS3DH interrupt (motion)");
+          } else if (cause == ESP_SLEEP_WAKEUP_TIMER) {
+            ESP_LOGI("boot", "Wake-up cause: Timer");
+          } else {
+            ESP_LOGI("boot", "Wake-up cause: Power-on / reset");
+          }
       - text_sensor.template.publish:
           id: wakeup_reason
           state: !lambda |-
-            switch (id(deep_sleep_ctrl).wakeup_cause()) {
-              case esphome::deep_sleep::WakeupCause::EXT0:
+            switch (esp_sleep_get_wakeup_cause()) {
+              case ESP_SLEEP_WAKEUP_EXT1:
                 return std::string("Движение (LIS3DH INT1)");
-              case esphome::deep_sleep::WakeupCause::TIMER:
+              case ESP_SLEEP_WAKEUP_TIMER:
                 return std::string("Таймер (10 мин)");
               default:
                 return std::string("Включение питания / сброс");
@@ -325,8 +325,7 @@ binary_sensor:
     id: motion_wakeup
     device_class: motion
     lambda: |-
-      return id(deep_sleep_ctrl).wakeup_cause() ==
-             esphome::deep_sleep::WakeupCause::EXT0;
+      return esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT1;
 
 # ── Текстовые сенсоры ────────────────────────────────────────────────────────
 text_sensor:
