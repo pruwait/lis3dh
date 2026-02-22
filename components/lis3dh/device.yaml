@@ -1,29 +1,29 @@
 # ╔══════════════════════════════════════════════════════════════════════════╗
-# ║  LIS3DH Motion Wake-up Device + Generator Voltage Monitor             ║
+# ║  LIS3DH Motion Wake-up Device + Generator Voltage Monitor                ║
 # ║                                                                          ║
-# ║  Схема работы:                                                          ║
-# ║    1. ESP32 просыпается от прерывания акселерометра (движение)         ║
-# ║    2. Считывает данные с LIS3DH и напряжение генератора                ║
-# ║    3. Не засыпает пока есть движение ИЛИ генератор работает            ║
-# ║    4. После 5 сек тишины и без генератора — уходит в deep sleep        ║
+# ║  Схема работы:                                                           ║
+# ║    1. ESP32 просыпается от прерывания акселерометра (движение)           ║
+# ║    2. Считывает данные с LIS3DH и напряжение генератора                  ║
+# ║    3. Не засыпает пока есть движение ИЛИ генератор работает              ║
+# ║    4. После 5 сек тишины и без генератора — уходит в deep sleep          ║
 # ║                                                                          ║
-# ║  Подключение:                                                           ║
-# ║    LIS3DH SDA  → GPIO21                                                 ║
-# ║    LIS3DH SCL  → GPIO22                                                 ║
-# ║    LIS3DH INT1 → GPIO33   (ext0 wake-up, RTC GPIO)                    ║
-# ║    LIS3DH VCC  → 3.3 V                                                  ║
-# ║    LIS3DH GND  → GND                                                   ║
-# ║    LIS3DH SA0  → GND     (I2C addr 0x18)                              ║
-# ║    LIS3DH CS   → VCC     (I2C mode)                                    ║
+# ║  Подключение:                                                            ║
+# ║    LIS3DH SDA  → GPIO21                                                  ║
+# ║    LIS3DH SCL  → GPIO22                                                  ║
+# ║    LIS3DH INT1 → GPIO33   (ext0 wake-up, RTC GPIO)                       ║
+# ║    LIS3DH VCC  → 3.3 V                                                   ║
+# ║    LIS3DH GND  → GND                                                     ║
+# ║    LIS3DH SA0  → GND     (I2C addr 0x18)                                 ║
+# ║    LIS3DH CS   → VCC     (I2C mode)                                      ║
 # ║                                                                          ║
-# ║  Напряжение генератора (делитель R1=100кΩ / R2=27кΩ):                 ║
-# ║    Генератор (+) → R1 → GPIO35 → R2 → GND                             ║
-# ║    Диапазон:  0–18 В → 0–3.3 В на АЦП                                 ║
-# ║    Коэф. пересчёта: × 4.704  (= 127/27)                               ║
-# ║    Порог «генератор работает»: > 11.5 В                                ║
+# ║  Напряжение генератора (делитель R1=100кΩ / R2=27кΩ):                    ║
+# ║    Генератор (+) → R1 → GPIO35 → R2 → GND                                ║
+# ║    Диапазон:  0–18 В → 0–3.3 В на АЦП                                    ║
+# ║    Коэф. пересчёта: × 4.704  (= 127/27)                                  ║
+# ║    Порог «генератор работает»: > 11.5 В                                  ║
 # ║                                                                          ║
-# ║  Батарея ESP32 (делитель R1=100кΩ / R2=100кΩ):                        ║
-# ║    Vbat (+) → R1 → GPIO34 → R2 → GND                                  ║
+# ║  Батарея ESP32 (делитель R1=100кΩ / R2=100кΩ):                           ║
+# ║    Vbat (+) → R1 → GPIO34 → R2 → GND                                     ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
 
 esphome:
@@ -43,6 +43,17 @@ esphome:
                esphome::deep_sleep::WakeupCause::EXT0)
               ? "LIS3DH interrupt (motion)"
               : "Power-on / reset"
+      - text_sensor.template.publish:
+          id: wakeup_reason
+          state: !lambda |-
+            switch (id(deep_sleep_ctrl).wakeup_cause()) {
+              case esphome::deep_sleep::WakeupCause::EXT0:
+                return std::string("Движение (LIS3DH INT1)");
+              case esphome::deep_sleep::WakeupCause::TIMER:
+                return std::string("Таймер (10 мин)");
+              default:
+                return std::string("Включение питания / сброс");
+            }
 
 esp32:
   board: esp32dev
@@ -70,12 +81,9 @@ wifi:
     - logger.log: "WiFi connected, publishing data..."
 
 api:
-  encryption:
-    key: !secret api_key
 
 ota:
   - platform: esphome
-    password: !secret ota_password
 
 # ── I2C ─────────────────────────────────────────────────────────────────────
 i2c:
@@ -124,9 +132,10 @@ deep_sleep:
   id: deep_sleep_ctrl
 
   # Wake-up от LIS3DH INT1 (HIGH на GPIO33)
-  esp32_ext0_wakeup:
-    pin: GPIO33
-    mode: HIGH
+  esp32_ext1_wakeup:
+    pins:
+      - number: GPIO33
+    mode: ANY_HIGH
 
   # Резервный таймер: health-check / OTA каждые 10 минут
   sleep_duration: 10min
@@ -231,7 +240,7 @@ sensor:
     id: generator_voltage
     unit_of_measurement: "V"
     accuracy_decimals: 2
-    attenuation: 11dB    # входной диапазон 0–3.9 В
+    attenuation: 12dB    # входной диапазон 0–3.9 В
     device_class: voltage
     state_class: measurement
     icon: mdi:car-battery
@@ -243,7 +252,8 @@ sensor:
           window_size: 10
           send_every: 5
       # Обрезаем шум у нуля
-      - lambda: return x < 0.1f ? 0.0f : x;
+      - lambda: |-
+          return x < 0.1f ? 0.0f : x;
     update_interval: 2s
     on_value:
       then:
@@ -268,7 +278,7 @@ sensor:
     id: battery_voltage
     unit_of_measurement: "V"
     accuracy_decimals: 2
-    attenuation: 11dB
+    attenuation: 12dB
     filters:
       - multiply: 2.0
       - sliding_window_moving_average:
@@ -323,20 +333,6 @@ text_sensor:
   - platform: template
     name: "Причина пробуждения"
     id: wakeup_reason
-    on_boot:
-      priority: 500
-      then:
-        - text_sensor.template.publish:
-            id: wakeup_reason
-            state: !lambda |-
-              switch (id(deep_sleep_ctrl).wakeup_cause()) {
-                case esphome::deep_sleep::WakeupCause::EXT0:
-                  return std::string("Движение (LIS3DH INT1)");
-                case esphome::deep_sleep::WakeupCause::TIMER:
-                  return std::string("Таймер (10 мин)");
-                default:
-                  return std::string("Включение питания / сброс");
-              }
 
   - platform: wifi_info
     ip_address:
